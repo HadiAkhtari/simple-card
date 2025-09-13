@@ -1,4 +1,4 @@
-package api
+package main
 
 import (
 	"github.com/gin-gonic/gin"
@@ -8,30 +8,51 @@ import (
 	"time"
 )
 
-type CreateKeyServiceRequest struct {
-	UserID     uint   `json:"user_id" binding:"required"`     // کاربر صاحب کارت
-	UserName   string `json:"user_name" binding:"required"`   // نام کاربر
-	Email      string `json:"email"`                          // اختیاری
-	Phone      string `json:"phone"`                          // اختیاری
-	TerminalID uint   `json:"terminal_id" binding:"required"` // دستگاه POS
-	KeyEnc     string `json:"key_enc" binding:"required"`     // کارت رمزنگاری شده
-	KeyType    string `json:"key_type" binding:"required"`    // نوع کلید کارت (PIN, Track)
+// KeyCardHandler یک struct است برای کار با KeyCard
+type KeyCardHandler struct {
+	repo *database.KeyCardModel // این repo دسترسی به دیتابیس را فراهم می‌کند
 }
 
-func (h *KeyCardHandler) CreateKeyService(c *gin.Context) {
-	var req CreateKeyServiceRequest
+// تابع سازنده
+func NewKeyCardHandler(repo *database.KeyCardModel) *KeyCardHandler {
+	return &KeyCardHandler{repo: repo}
+}
+
+type CreatePOSRequest struct {
+	User     UserRequest     `json:"user" binding:"required"`
+	Terminal TerminalRequest `json:"terminal" binding:"required"`
+	KeyCard  KeyCardRequest  `json:"keycard" binding:"required"`
+}
+
+type UserRequest struct {
+	ID       uint   `json:"id"`
+	Username string `json:"username" binding:"required"`
+	Email    string `json:"email"`
+	Phone    string `json:"phone"`
+}
+
+type TerminalRequest struct {
+	ID           uint   `json:"id"`
+	SerialNumber string `json:"serial_number" binding:"required"`
+	Model        string `json:"model"`
+}
+
+type KeyCardRequest struct {
+	KeyEnc  string `json:"key_enc" binding:"required"`
+	KeyType string `json:"key_type" binding:"required"`
+}
+
+func (h *KeyCardHandler) CreatePOSData(c *gin.Context) {
+	var req CreatePOSRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 1️⃣ ذخیره یا به‌روزرسانی اطلاعات کاربر
+	// 1️⃣ ذخیره یا آپدیت کاربر
 	user := database.User{
-		ID:       req.UserID,
-		Username: req.UserName,
-		Email:    req.Email,
-		Phone:    req.Phone,
-		Status:   "ACTIVE",
+		ID:     req.User.ID,
+		Status: "ACTIVE",
 	}
 	if err := h.repo.DB.Clauses(clause.OnConflict{
 		UpdateAll: true,
@@ -40,12 +61,25 @@ func (h *KeyCardHandler) CreateKeyService(c *gin.Context) {
 		return
 	}
 
-	// 2️⃣ ذخیره کلید کارت مرتبط با کاربر و دستگاه POS
+	// 2️⃣ ذخیره یا آپدیت ترمینال
+	terminal := database.Terminal{
+		ID:           req.Terminal.ID,
+		UserID:       user.ID, // اگر می‌خوای ترمینال به کاربر وصل باشه
+		SerialNumber: req.Terminal.SerialNumber,
+		Model:        req.Terminal.Model,
+		Status:       "ACTIVE",
+	}
+	if err := h.repo.DB.Clauses(clause.OnConflict{
+		UpdateAll: true,
+	}).Create(&terminal).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 3️⃣ ذخیره کلید کارت
 	key := database.KeyCard{
-		UserID:     req.UserID,
-		TerminalID: req.TerminalID,
-		KeyEnc:     []byte(req.KeyEnc), // رمزنگاری واقعی بهتر است
-		KeyType:    req.KeyType,
+		UserID:     user.ID,
+		TerminalID: terminal.ID,
 		CreatedAt:  time.Now(),
 	}
 	if err := h.repo.DB.Create(&key).Error; err != nil {
@@ -53,14 +87,10 @@ func (h *KeyCardHandler) CreateKeyService(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"message": "User and Key saved successfully", "key_id": key.ID})
-}
-func (h *KeyCardHandler) GetAllKeyService(c *gin.Context) {
-	var keys []database.KeyCard
-	if err := h.repo.DB.Preload("User").Preload("Terminal").Find(&keys).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"keys": keys})
+	c.JSON(http.StatusCreated, gin.H{
+		"message":     "User, Terminal and Key saved successfully",
+		"user_id":     user.ID,
+		"terminal_id": terminal.ID,
+		"key_id":      key.ID,
+	})
 }
