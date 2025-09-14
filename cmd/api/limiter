@@ -1,0 +1,63 @@
+// فایل: limiter.go
+package limiter
+
+import (
+	"sync"
+	"time"
+)
+
+// Limiter: برای هر terminalID یک باکت توکن درست می‌کند
+type Limiter struct {
+	mu     sync.Mutex
+	bucket map[uint]chan struct{}
+	limit  int
+	interval time.Duration
+}
+
+func New(limit int, interval time.Duration) *Limiter {
+	return &Limiter{
+		bucket: make(map[uint]chan struct{}),
+		limit:  limit,
+		interval: interval,
+	}
+}
+
+// getBucket اگر وجود نداشت می‌سازد
+func (l *Limiter) getBucket(id uint) chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	b, ok := l.bucket[id]
+	if !ok {
+		b = make(chan struct{}, l.limit)
+		// پر کن با توکن اولیه
+		for i := 0; i < l.limit; i++ {
+			b <- struct{}{}
+		}
+		// هر interval یک توکن برگردان داخل باکت (تا پر شود)
+		go func(ch chan struct{}) {
+			ticker := time.NewTicker(l.interval)
+			defer ticker.Stop()
+			for range ticker.C {
+				select {
+				case ch <- struct{}{}: // اگر جا داشت
+				default:               // پر بود → رد شو
+				}
+			}
+		}(b)
+
+		l.bucket[id] = b
+	}
+	return b
+}
+
+// Allow: اگر توکن بود true می‌دهد
+func (l *Limiter) Allow(id uint) bool {
+	b := l.getBucket(id)
+	select {
+	case <-b:
+		return true
+	default:
+		return false
+	}
+}
