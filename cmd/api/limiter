@@ -1,63 +1,69 @@
-// فایل: limiter.go
-package limiter
+package main
 
 import (
-	"sync"
-	"time"
+    "errors"
+    "fmt"
+    "gorm.io/driver/mysql"
+    "gorm.io/gorm"
+    "log"
+    "your_project/models"
 )
 
-// Limiter: برای هر terminalID یک باکت توکن درست می‌کند
-type Limiter struct {
-	mu     sync.Mutex
-	bucket map[uint]chan struct{}
-	limit  int
-	interval time.Duration
+func processRequest(db *gorm.DB, terminalID string) (string, error) {
+    var terminal models.PosTerminal
+
+    // تراکنش برای اتمیک بودن
+    err := db.Transaction(func(tx *gorm.DB) error {
+        // قفل رکورد برای به‌روزرسانی
+        if err := tx.Clauses(gorm.Locking{Strength: "UPDATE"}).
+            Where("terminal_id = ?", terminalID).First(&terminal).Error; err != nil {
+
+            if errors.Is(err, gorm.ErrRecordNotFound) {
+                // ترمینال جدید، ایجاد رکورد با used_requests=1
+                terminal = models.PosTerminal{
+                    TerminalID:   terminalID,
+                    UsedRequests: 1,
+                    MaxRequests:  1000,
+                }
+                if err := tx.Create(&terminal).Error; err != nil {
+                    return err
+                }
+                return nil
+            }
+            return err
+        }
+
+        if terminal.UsedRequests >= terminal.MaxRequests {
+            return errors.New("سهمیه درخواست این پوز تمام شده")
+        }
+
+        // افزایش شمارنده
+        if err := tx.Model(&terminal).
+            Update("used_requests", gorm.Expr("used_requests + ?", 1)).Error; err != nil {
+            return err
+        }
+
+        return nil
+    })
+
+    if err != nil {
+        return "", err
+    }
+
+    return "درخواست پذیرفته شد", nil
 }
 
-func New(limit int, interval time.Duration) *Limiter {
-	return &Limiter{
-		bucket: make(map[uint]chan struct{}),
-		limit:  limit,
-		interval: interval,
-	}
-}
+func main() {
+    dsn := "user:pass@tcp(localhost:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local"
+    db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+    if err != nil {
+        log.Fatal(err)
+    }
 
-// getBucket اگر وجود نداشت می‌سازد
-func (l *Limiter) getBucket(id uint) chan struct{} {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	b, ok := l.bucket[id]
-	if !ok {
-		b = make(chan struct{}, l.limit)
-		// پر کن با توکن اولیه
-		for i := 0; i < l.limit; i++ {
-			b <- struct{}{}
-		}
-		// هر interval یک توکن برگردان داخل باکت (تا پر شود)
-		go func(ch chan struct{}) {
-			ticker := time.NewTicker(l.interval)
-			defer ticker.Stop()
-			for range ticker.C {
-				select {
-				case ch <- struct{}{}: // اگر جا داشت
-				default:               // پر بود → رد شو
-				}
-			}
-		}(b)
-
-		l.bucket[id] = b
-	}
-	return b
-}
-
-// Allow: اگر توکن بود true می‌دهد
-func (l *Limiter) Allow(id uint) bool {
-	b := l.getBucket(id)
-	select {
-	case <-b:
-		return true
-	default:
-		return false
-	}
+    msg, err := processRequest(db, "POS-123")
+    if err != nil {
+        fmt.Println("خطا:", err)
+    } else {
+        fmt.Println(msg)
+    }
 }
